@@ -4,10 +4,10 @@
  *
  * Utility program for X-Rite i1d3 probes
  *
- * Date:   1/1/2020
+ * Date:   1/1/2020 (refactored for cross-platform support 2026)
  *
  * This material is licenced under the GNU GENERAL PUBLIC LICENSE Version 2 or later :-
- * see the License.txt file for licencing details.
+ * see the ../License file for licencing details.
  * 
  * 
  */
@@ -18,7 +18,7 @@
 // This work is shared AS IS.  You use it at your own risk.  It is possible, though unlikely that you could damage your probe if used.
 //
 // This work was inspired in part by the driver code from Argyll color management system
-// full credit is given to Argyll’s author for any code similarities.
+// full credit is given to Argyll?s author for any code similarities.
 // https://www.argyllcms.com/
 //
 // Additional information was obtained by the use of the protocol analysis tool Wireshark
@@ -27,14 +27,14 @@
 // Further information was obtained by extracting the firmware from i1d3 using PICKIT2 tools from Microchip and analysing it with Ghidra
 // https://ghidra-sre.org/
 //
-// As a note, no Windows dlls were analysed in order to create i1d3util.  It was just not required!
+// As a note, no Windows DLLs were analysed in order to create i1d3util.  It was just not required!
 //
 //
 //
 //
 //
-// The i1d3 has both internal and external eeproms.  The internal eeprom contains the serial number, the external eeprom contains the unique
-// device sensor calibration data and the “signature” that determines which flavour of i1d3 it is locked to (oem, retail, colormunki,C6 etc.)
+// The i1d3 has both internal and external EEPROMs.  The internal EEPROM contains the serial number, the external EEPROM contains the unique
+// device sensor calibration data and the ?signature? that determines which flavour of i1d3 it is locked to (oem, retail, colormunki,C6 etc.)
 // 
 // The command i1d3util -? will give a help screen
 //
@@ -42,26 +42,26 @@
 // The i1d3util tool can read the data out of the id3 and write it to disk, it can also take data on disk and write it back into the i1d3.  
 // By doing this, you can backup and restore your probe.
 //
-// The i1d3util tool can access both internal and external eeprom data.  It can also specifically access/change the serial number and signature data.
+// The i1d3util tool can access both internal and external EEPROM data.  It can also specifically access/change the serial number and signature data.
 //
 // For example, if you have a retail probe and the signature data from an oem probe, you can load the oem signature into the retail probe.  
 // The probe will now operate as if it were a factory oem probe.
 //
-// The –f option enables you to overwrite (without warning!!) a file on disk.
-// The –w option enables ACTUAL writing to the i1d3 eeproms!
-// The –v reads the firmware revision from the i1d3 hardware
+// The -f option enables you to overwrite (without warning!!) a file on disk.
+// The -w option enables ACTUAL writing to the i1d3 EEPROMs!
+// The -v reads the firmware revision from the i1d3 hardware
 // 
 // Example command to load a oem probe signiture file into ANY i1d3 probe:
 // 
 // i1d3util -w -S oem1D3signature.bin
 //
 //
-// It is STRONGLY RECOMMENDED that you save you probes current internal eeprom data, external eeprom data, 
+// It is STRONGLY RECOMMENDED that you save you probes current internal EEPROM data, external EEPROM data, 
 // signature data and serial number before you start changing anything
 //
 // Be VERY careful to write the correct data file to the correct section of the probe!!
 //
-// It is possible to corrupt the internal eeprom.  If this happens, the i1d3 reports back a different USB Vendor ID.  
+// It is possible to corrupt the internal EEPROM.  If this happens, the i1d3 reports back a different USB Vendor ID.  
 // The i1d3util will try and detect this and correct the problem.
 //
 // Between each WRITE to the i1d3, it is important that you unplug and plug back in the probe to reset the Windows device driver.
@@ -72,29 +72,30 @@
 // Have fun!
 
 
-#include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
 
-#include <setupapi.h>
-
 #include <math.h>
+#include <ctype.h>
+#include <stdint.h>
+#include <string.h>
 #include <iostream>
 #include <fstream>
+#include <hidapi.h>
 
 
 using namespace std;
 
 int optind(1), optopt;
-char* optarg;
+const char* optarg;
 
 #define BADCH   (int)'?'
 #define BADARG  (int)':'
-#define EMSG    ""
+static const char EMSG[] = "";
 
 int getopt(int nargc, char * const nargv[], const char *ostr)
 {
-	static char *place = EMSG;              /* option letter processing */
+	static const char *place = EMSG;        /* option letter processing */
 	const char *oli;                        /* option letter list index */
 
 	if(!*place)
@@ -142,9 +143,6 @@ int getopt(int nargc, char * const nargv[], const char *ostr)
 	return optopt;
 }
 
-/* Declartions to enable HID access without using the DDK */
-#define DIDD_BUFSIZE sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA) + (sizeof(TCHAR)*MAX_PATH)
-
 class hidIdevice
 {
 	public:
@@ -152,126 +150,42 @@ class hidIdevice
 				   ~hidIdevice(){ if(dpath) delete[] dpath;};
 
 	char*			dpath;
-	HANDLE			fh;
-	OVERLAPPED		ols;
+	hid_device*		fh;
 	unsigned int	ProductID;
 };
 
-
-typedef struct _HIDD_ATTRIBUTES
+int loadDLLfuncs()
 {
-	ULONG	Size;
-	USHORT	VendorID;
-	USHORT	ProductID;
-	USHORT	VersionNumber;
-} HIDD_ATTRIBUTES, *PHIDD_ATTRIBUTES;
-
-typedef void (__stdcall *FP_HidD_GetHidGuid)   (LPGUID HidGuid);
-typedef BOOL (__stdcall *FP_HidD_GetAttributes)(HANDLE , PHIDD_ATTRIBUTES Attributes);
-FP_HidD_GetHidGuid    HidD_GetHidGuid;
-FP_HidD_GetAttributes HidD_GetAttributes;
-
-HINSTANCE loadDLLfuncs()
-{
-	static HINSTANCE lib(0);
-
-	if(!lib)
-	{
-		lib = LoadLibrary("HID");
-		if(lib)
-		{
-			HidD_GetHidGuid    = (FP_HidD_GetHidGuid)    GetProcAddress(lib, "HidD_GetHidGuid");
-			HidD_GetAttributes = (FP_HidD_GetAttributes) GetProcAddress(lib, "HidD_GetAttributes");
-		}
-
-		if((HidD_GetHidGuid == 0) || (HidD_GetAttributes == 0)) lib = 0;
-	}
-
-	return lib;
+	return (hid_init() == 0) ? 1 : 0;
 }
 
 
 hidIdevice* findHIDdevice()
 {
-	// Get the GUID for HIDClass devices
-	GUID HidGuid;
-	HidD_GetHidGuid(&HidGuid);
-
-	// Get the device information for all devices of the HID class
-	HDEVINFO hdinfo;
-	hdinfo = SetupDiGetClassDevs(&HidGuid, NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE); 
-	if(hdinfo == INVALID_HANDLE_VALUE) return 0;
-
-	/* Get each devices interface data in turn */
-	SP_DEVICE_INTERFACE_DATA diData;
-	diData.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
-
-	PSP_DEVICE_INTERFACE_DETAIL_DATA pdiDataDetail;
-	char* diddBuf[DIDD_BUFSIZE];
-	pdiDataDetail = (PSP_DEVICE_INTERFACE_DETAIL_DATA)diddBuf;  
-	pdiDataDetail->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
-
-	SP_DEVINFO_DATA dinfoData;
-	dinfoData.cbSize = sizeof(SP_DEVINFO_DATA);
-
 	hidIdevice* hidDev(0);
+	hid_device_info* devs = hid_enumerate(0x0, 0x0);
+	hid_device_info* cur = devs;
 
-	for(unsigned int c(0); ; ++c)
+	while(cur)
 	{
-		if(SetupDiEnumDeviceInterfaces(hdinfo, NULL, &HidGuid, c, &diData) == 0)
-		{
-			if (GetLastError() == ERROR_NO_MORE_ITEMS) break;
-
-			return 0;
-		}
-
-		if(SetupDiGetDeviceInterfaceDetail(hdinfo, &diData, pdiDataDetail, DIDD_BUFSIZE, NULL, &dinfoData) == 0)
-		{
-			return 0;
-		}
-
-		// Extract the vid and pid from the device path
-		unsigned int VendorID(0);
-		unsigned int ProductID(0);
-	
-		char *cPtr;
-		char cBuf[20];
-
-		if((cPtr = strchr(pdiDataDetail->DevicePath, 'v')) == NULL) continue;
-		if(strlen(cPtr) < 8) continue;
-		if(cPtr[1] != 'i' || cPtr[2] != 'd' || cPtr[3] != '_') continue;
-		memcpy(cBuf, cPtr + 4, 4);
-		cBuf[4] = 0;
-		if(sscanf(cBuf, "%x", &VendorID) != 1) continue;
-
-		if((cPtr = strchr(pdiDataDetail->DevicePath, 'p')) == NULL) continue;
-		if(strlen(cPtr) < 8) break;
-		if(cPtr[1] != 'i' || cPtr[2] != 'd' || cPtr[3] != '_') continue;
-		memcpy(cBuf, cPtr + 4, 4);
-		cBuf[4] = 0;
-		if(sscanf(cBuf, "%x", &ProductID) != 1) break;
-
-		//Is it an X-Rite i1DisplayPro, ColorMunki Display (HID)
-		if((VendorID == 0x0765) && ((ProductID == 0x5020) || (ProductID == 0x5021)))
+		unsigned int vendorID = cur->vendor_id;
+		unsigned int productID = cur->product_id;
+		if((vendorID == 0x0765) && ((productID == 0x5020) || (productID == 0x5021)))
 		{
 			hidDev = new hidIdevice;
 			if(!hidDev) return 0;
-			hidDev->dpath = new char[strlen(pdiDataDetail->DevicePath) + 2];
+			hidDev->dpath = new char[strlen(cur->path) + 1];
 			if(!hidDev->dpath) return 0;
-			memset(hidDev->dpath, 0x00, strlen(pdiDataDetail->DevicePath) + 2);
+			memset(hidDev->dpath, 0x00, strlen(cur->path) + 1);
+			strcpy(hidDev->dpath, cur->path);
 
-			/* Windows 10 seems to return paths without the leading '\\' */
-			if(pdiDataDetail->DevicePath[0] == '\\' &&	pdiDataDetail->DevicePath[1] != '\\') strcpy(hidDev->dpath, "\\");
-			strcpy(hidDev->dpath, pdiDataDetail->DevicePath);
-
-			hidDev->ProductID = ProductID;
+			hidDev->ProductID = productID;
 
 			break;
 		}
+		cur = cur->next;
 	}
-
-	//cleanup hdifo
-	if(SetupDiDestroyDeviceInfoList(hdinfo) == 0) return 0;
+	hid_free_enumeration(devs);
 
     return hidDev;
 }
@@ -279,72 +193,52 @@ hidIdevice* findHIDdevice()
 
 bool openHIDdevice(hidIdevice* dev)
 {
-	// Open the device
-	dev->fh = CreateFile(dev->dpath, GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
-
-	if(dev != INVALID_HANDLE_VALUE)
-	{
-		memset(&dev->ols,0,sizeof(OVERLAPPED));
-		dev->ols.hEvent = CreateEvent(NULL, 0, 0, NULL);
-  		if(dev->ols.hEvent == NULL) return false;
-		
-		return true;
-	}
-
-	return false;
+	if(dev == NULL || dev->dpath == NULL) return false;
+	dev->fh = hid_open_path(dev->dpath);
+	return (dev->fh != NULL);
 }
+
+int i1d3ReadExternalEeprom(hidIdevice* dev, unsigned char* buf);
+int i1d3ReadInternalEeprom(hidIdevice* dev, unsigned char* buf);
 
 
 void closeHIDdevice(hidIdevice* dev)
 {
-	if(dev != NULL)
-	{
-		CloseHandle(dev->ols.hEvent);
-		CloseHandle(dev->fh);
-	}
+	if(dev == NULL) return;
+	if(dev->fh) hid_close(dev->fh);
+	delete dev;
 }
 
 
 int	readHIDdevice(hidIdevice* dev, unsigned char* rbuf,	int numToRead, double timeout)
 {
-	int numRead(0);
+	if(dev == NULL || dev->fh == NULL) return -1;
 
 	unsigned char* lBuf;
 	lBuf = new unsigned char[numToRead + 1];
 	if(!lBuf) return -1;
 	memset(lBuf, 0x00, numToRead + 1);
 
-	if (ReadFile(dev->fh, lBuf, numToRead + 1, (LPDWORD)&numRead, &dev->ols) == 0)
-	{
-		if(GetLastError() != ERROR_IO_PENDING)
-		{
-			numRead = -1; 
-		}
-		else
-		{
-			int res;
-			res = WaitForSingleObject(dev->ols.hEvent, (int)(timeout * 1000.0 + 0.5));
-			if(res == WAIT_FAILED)
-			{
-				numRead = -1;
-			}
-			else if
-			(res == WAIT_TIMEOUT)
-			{
-				CancelIo(dev->fh);
-				numRead = -1;
-			}
-			else
-			{
-				numRead = dev->ols.InternalHigh;
-			}
-		}
-	}
+	int numRead = hid_read_timeout(dev->fh, lBuf, numToRead + 1, (int)(timeout * 1000.0 + 0.5));
 
 	if(numRead > 0)
 	{
-		numRead--;
-		memcpy(rbuf, lBuf + 1, numRead);
+		/*
+		 * Different HID backends return input reports differently:
+		 * - some include a leading report-id byte (often 0x00),
+		 * - others return payload bytes only.
+		 * Handle both to keep protocol framing stable across OSes.
+		 */
+		if(numRead == (numToRead + 1))
+		{
+			numRead--;
+			memcpy(rbuf, lBuf + 1, numRead);
+		}
+		else
+		{
+			if(numRead > numToRead) numRead = numToRead;
+			memcpy(rbuf, lBuf, numRead);
+		}
 	}
 
 	delete[] lBuf;
@@ -355,7 +249,7 @@ int	readHIDdevice(hidIdevice* dev, unsigned char* rbuf,	int numToRead, double ti
 
 int writeHIDdevice(hidIdevice* dev,	unsigned char* wbuf, int numToWrite, double timeout = 1.0)
 {
-	int numWritten(0);
+	if(dev == NULL || dev->fh == NULL) return -1;
 
 	unsigned char* lBuf;
 	lBuf = new unsigned char[numToWrite + 1];
@@ -363,31 +257,8 @@ int writeHIDdevice(hidIdevice* dev,	unsigned char* wbuf, int numToWrite, double 
 	memset(lBuf, 0x00, numToWrite + 1);
 	memcpy(lBuf + 1, wbuf, numToWrite);
 
-	if(WriteFile(dev->fh, lBuf, numToWrite + 1, (LPDWORD)&numWritten, &dev->ols) == 0)
-	{ 
-		if (GetLastError() != ERROR_IO_PENDING)
-		{
-			numWritten = -1; 
-		}
-		else
-		{
-			int res;
-			res = WaitForSingleObject(dev->ols.hEvent, (int)(timeout * 1000.0 + 0.5));
-			if (res == WAIT_FAILED)
-			{
-				numWritten = -1; 
-			}
-			else if (res == WAIT_TIMEOUT)
-			{
-				CancelIo(dev->fh);
-				numWritten = -1; 
-			}
-			else
-			{
-				numWritten = dev->ols.InternalHigh;
-			}
-		}
-	}
+	(void)timeout;
+	int numWritten = hid_write(dev->fh, lBuf, numToWrite + 1);
 
 	if(numWritten > 0)
 	{
@@ -397,6 +268,214 @@ int writeHIDdevice(hidIdevice* dev,	unsigned char* wbuf, int numToWrite, double 
 	delete[] lBuf;
 
 	return numWritten;
+}
+
+bool writeFileBytes(const char* fileName, const unsigned char* buf, size_t len, bool forceOverwrite)
+{
+	if(!forceOverwrite)
+	{
+		FILE* check = fopen(fileName, "rb");
+		if(check)
+		{
+			fclose(check);
+			return false;
+		}
+	}
+
+	FILE* f = fopen(fileName, "wb");
+	if(!f) return false;
+
+	size_t written = fwrite(buf, 1, len, f);
+	fclose(f);
+	return (written == len);
+}
+
+bool readFileBytes(const char* fileName, unsigned char* buf, size_t len)
+{
+	FILE* f = fopen(fileName, "rb");
+	if(!f) return false;
+
+	size_t noRead = fread(buf, 1, len, f);
+	fclose(f);
+	return (noRead == len);
+}
+
+bool validateFileSize(const char* fileName, size_t expectedSize)
+{
+	FILE* f = fopen(fileName, "rb");
+	if(!f) return false;
+
+	if(fseek(f, 0, SEEK_END) != 0)
+	{
+		fclose(f);
+		return false;
+	}
+
+	long sz = ftell(f);
+	fclose(f);
+	if(sz < 0) return false;
+
+	return ((size_t)sz == expectedSize);
+}
+
+bool verifyFileMatches(const char* fileName, const unsigned char* expected, size_t len)
+{
+	unsigned char* verifyBuf = new unsigned char[len];
+	if(!verifyBuf) return false;
+
+	bool ok = readFileBytes(fileName, verifyBuf, len);
+	if(ok) ok = (memcmp(verifyBuf, expected, len) == 0);
+
+	delete[] verifyBuf;
+	return ok;
+}
+
+static inline uint32_t sha256_rotr(uint32_t v, uint32_t n)
+{
+	return (v >> n) | (v << (32 - n));
+}
+
+void sha256Bytes(const unsigned char* data, size_t len, unsigned char out[32])
+{
+	static const uint32_t k[64] = {
+		0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+		0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+		0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+		0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+		0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+		0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+		0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+		0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+	};
+
+	uint32_t h[8] = {
+		0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19
+	};
+
+	size_t newLen = len + 1;
+	while((newLen % 64) != 56) ++newLen;
+	unsigned char* msg = new unsigned char[newLen + 8];
+	memset(msg, 0x00, newLen + 8);
+	memcpy(msg, data, len);
+	msg[len] = 0x80;
+	uint64_t bitLen = (uint64_t)len * 8ULL;
+	for(int i = 0; i < 8; ++i) msg[newLen + 7 - i] = (unsigned char)((bitLen >> (i * 8)) & 0xff);
+
+	for(size_t off = 0; off < newLen + 8; off += 64)
+	{
+		uint32_t w[64];
+		for(int i = 0; i < 16; ++i)
+		{
+			size_t j = off + (size_t)i * 4;
+			w[i] = ((uint32_t)msg[j] << 24) | ((uint32_t)msg[j + 1] << 16) | ((uint32_t)msg[j + 2] << 8) | (uint32_t)msg[j + 3];
+		}
+		for(int i = 16; i < 64; ++i)
+		{
+			uint32_t s0 = sha256_rotr(w[i - 15], 7) ^ sha256_rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+			uint32_t s1 = sha256_rotr(w[i - 2], 17) ^ sha256_rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+			w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+		}
+
+		uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], x = h[7];
+		for(int i = 0; i < 64; ++i)
+		{
+			uint32_t S1 = sha256_rotr(e, 6) ^ sha256_rotr(e, 11) ^ sha256_rotr(e, 25);
+			uint32_t ch = (e & f) ^ (~e & g);
+			uint32_t temp1 = x + S1 + ch + k[i] + w[i];
+			uint32_t S0 = sha256_rotr(a, 2) ^ sha256_rotr(a, 13) ^ sha256_rotr(a, 22);
+			uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+			uint32_t temp2 = S0 + maj;
+
+			x = g; g = f; f = e; e = d + temp1;
+			d = c; c = b; b = a; a = temp1 + temp2;
+		}
+
+		h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+		h[4] += e; h[5] += f; h[6] += g; h[7] += x;
+	}
+
+	delete[] msg;
+
+	for(int i = 0; i < 8; ++i)
+	{
+		out[i * 4 + 0] = (unsigned char)((h[i] >> 24) & 0xff);
+		out[i * 4 + 1] = (unsigned char)((h[i] >> 16) & 0xff);
+		out[i * 4 + 2] = (unsigned char)((h[i] >> 8) & 0xff);
+		out[i * 4 + 3] = (unsigned char)(h[i] & 0xff);
+	}
+}
+
+bool isBlockedRetailSignature(const unsigned char* sigBuf, size_t sigLen)
+{
+	static const unsigned char blockedSha256[32] = {
+		0x3a,0xd0,0xb3,0x90,0x75,0xea,0xa4,0xb9,0xfe,0xa6,0x65,0x7f,0xe2,0x8f,0x46,0xdd,
+		0x6a,0x44,0xd8,0xd4,0x49,0xb3,0x8f,0xbc,0x35,0x4e,0x05,0x51,0x74,0xcd,0xb1,0xaa
+	};
+	if(sigLen != 0x48) return false;
+
+	unsigned char digest[32];
+	sha256Bytes(sigBuf, sigLen, digest);
+	return (memcmp(digest, blockedSha256, 32) == 0);
+}
+
+bool readInternalEepromStable(hidIdevice* dev, unsigned char* outBuf)
+{
+	unsigned char* r1 = new unsigned char[256];
+	unsigned char* r2 = new unsigned char[256];
+	unsigned char* r3 = new unsigned char[256];
+	if(!r1 || !r2 || !r3)
+	{
+		if(r1) delete[] r1;
+		if(r2) delete[] r2;
+		if(r3) delete[] r3;
+		return false;
+	}
+
+	memset(r1, 0x00, 256);
+	memset(r2, 0x00, 256);
+	memset(r3, 0x00, 256);
+
+	i1d3ReadInternalEeprom(dev, r1);
+	i1d3ReadInternalEeprom(dev, r2);
+	i1d3ReadInternalEeprom(dev, r3);
+
+	bool match = (memcmp(r1, r2, 256) == 0) && (memcmp(r1, r3, 256) == 0);
+	if(match) memcpy(outBuf, r1, 256);
+
+	delete[] r1;
+	delete[] r2;
+	delete[] r3;
+	return match;
+}
+
+bool readExternalEepromStable(hidIdevice* dev, unsigned char* outBuf)
+{
+	unsigned char* r1 = new unsigned char[8192];
+	unsigned char* r2 = new unsigned char[8192];
+	unsigned char* r3 = new unsigned char[8192];
+	if(!r1 || !r2 || !r3)
+	{
+		if(r1) delete[] r1;
+		if(r2) delete[] r2;
+		if(r3) delete[] r3;
+		return false;
+	}
+
+	memset(r1, 0x00, 8192);
+	memset(r2, 0x00, 8192);
+	memset(r3, 0x00, 8192);
+
+	i1d3ReadExternalEeprom(dev, r1);
+	i1d3ReadExternalEeprom(dev, r2);
+	i1d3ReadExternalEeprom(dev, r3);
+
+	bool match = (memcmp(r1, r2, 8192) == 0) && (memcmp(r1, r3, 8192) == 0);
+	if(match) memcpy(outBuf, r1, 8192);
+
+	delete[] r1;
+	delete[] r2;
+	delete[] r3;
+	return match;
 }
 
 
@@ -697,14 +776,14 @@ int i1d3UnLock(hidIdevice* dev)
 
 		// Send the challenge
 		cmd = 0x9900;
-		i1d3Command(dev, cmd, tBuf, fBuf);
+		if(i1d3Command(dev, cmd, tBuf, fBuf) < 0) continue;
 
 		// Convert challenge to response
 		i1d3CreateUnLockResponse(i1d3UnLockKeys[cc][0], i1d3UnLockKeys[cc][1], fBuf, tBuf);
 
 		// Send the response
 		cmd = 0x9a00;
-		i1d3Command(dev, cmd, tBuf, fBuf);
+		if(i1d3Command(dev, cmd, tBuf, fBuf) < 0) continue;
 
 		if(fBuf[2] == 0x77)
 		{
@@ -735,9 +814,8 @@ int i1d3EnWrite(hidIdevice* dev)
 	tBuf[3]	= 0x25;
 	tBuf[4]	= 0x41;
 
-	i1d3Command(dev, cmd, tBuf, fBuf);
-
-	return -1;
+	if(i1d3Command(dev, cmd, tBuf, fBuf) < 0) return -1;
+	return 0;
 }
 
 unsigned int calcCsum(unsigned char* buf, bool alt = false)
@@ -756,12 +834,12 @@ unsigned int calcCsum(unsigned char* buf, bool alt = false)
 }
 
 
-//extern char *optarg;
+//extern const char *optarg;
 //extern int optind, opterr, optopt;
 
 int main(int argc, char **argv)
 {
-	cout << "i1d3util ver 1.0" << endl;
+	cout << "i1d3util ver 1.1" << endl;
 
 
     char* fileName(0);
@@ -777,11 +855,12 @@ int main(int argc, char **argv)
 	bool wEeeprom(false);
 	bool rSig(false);
 	bool wSig(false);
+	bool rAll(false);
 
     int   opt(0);
     while(1)
     {
-        opt = getopt(argc, argv, "fwvnNiIeEsS");
+        opt = getopt(argc, argv, "fwavnNiIeEsS");
         
         if(opt == -1) break;
                 
@@ -798,7 +877,7 @@ int main(int argc, char **argv)
                 enableEEPROMwrite = true;
             }
             break;
-            
+
             case 'v':
             {
 				verNum = true;
@@ -846,6 +925,12 @@ int main(int argc, char **argv)
 				rSig = true;
             }
             break;
+
+            case 'a':
+            {
+				rAll = true;
+            }
+            break;
             
             case 'S':
             {
@@ -863,17 +948,19 @@ int main(int argc, char **argv)
             cout << " -n              read the i1d3 serial number"							<< endl;
             cout << " -N              write the i1d3 serial number"							<< endl;
 	        cout																			<< endl;
-            cout << " -i              read the internal eeprom and write it to a file"		<< endl;
-            cout << " -I              read a file and load it into the internal eeprom"		<< endl;
+            cout << " -i              read the internal EEPROM and write it to a file"		<< endl;
+            cout << " -I              read a file and load it into the internal EEPROM"		<< endl;
 	        cout																			<< endl;
-            cout << " -e              read the external eeprom and write it to a file"		<< endl;
-            cout << " -E              read a file and load it into the external eeprom"		<< endl;
+            cout << " -e              read the external EEPROM and write it to a file"		<< endl;
+            cout << " -E              read a file and load it into the external EEPROM"		<< endl;
 	        cout																			<< endl;
-            cout << " -s              read external eeprom signature and write to a file"	<< endl;
-            cout << " -S              read a signature file and update the external eeprom"	<< endl;
+            cout << " -s              read external EEPROM signature and write to a file"	<< endl;
+            cout << " -S              read a signature file and update the external EEPROM"	<< endl;
+	        cout																			<< endl;
+            cout << " -a              read all EEPROM data and auto-save by serial number"	<< endl;
 	        cout																			<< endl;
             cout << " -f              force file overwrite"									<< endl;
-            cout << " -w              enable eeprom writing"								<< endl;
+            cout << " -w              enable EEPROM writing"									<< endl;
 	        exit(1);
             }
             break;
@@ -896,6 +983,20 @@ int main(int argc, char **argv)
 		cout << "Error: missing filename" << endl;
 		exit(1);
 	}
+
+	if(rAll && fileName)
+	{
+		if(fileName) delete[] fileName;
+		cout << "Error: -a does not take a filename argument" << endl;
+		exit(1);
+	}
+
+	if(rAll && (verNum || rSerNum || wSerNum || rIeeprom || wIeeprom || rEeeprom || wEeeprom || rSig || wSig))
+	{
+		if(fileName) delete[] fileName;
+		cout << "Error: -a cannot be combined with other read/write action flags" << endl;
+		exit(1);
+	}
 	
 	if(wSerNum && !fileName)
 	{
@@ -903,7 +1004,14 @@ int main(int argc, char **argv)
 		exit(1);
 	}
 
-    if(!fileName && !verNum && !rSerNum && !wSerNum && !rIeeprom && !wIeeprom && !rEeeprom && !wEeeprom && !rSig && !wSig)
+	bool writeOp = (wSerNum || wIeeprom || wEeeprom || wSig);
+	if(writeOp && !enableEEPROMwrite)
+	{
+		cout << "Error: refusing write operation without -w" << endl;
+		exit(1);
+	}
+
+    if(!fileName && !verNum && !rSerNum && !wSerNum && !rIeeprom && !wIeeprom && !rEeeprom && !wEeeprom && !rSig && !wSig && !rAll)
 	{
         cout << "i1d3util -? for help" << endl;
 	}
@@ -930,16 +1038,21 @@ int main(int argc, char **argv)
 
 	if(hidDev->ProductID == 0x5021)
 	{
-        cout << "Warning: The product ID is 0x5021!  This may mean you internal eeprom is corrupt." << endl;
+        cout << "Warning: The product ID is 0x5021!  This may mean your internal EEPROM is corrupt." << endl;
         cout << "We will attempt to reset it." << endl;
 
-		// For some reason, if you modify the internal eeprom to change the serial number, the i1d3 returns back with the product code 0x5021
+		// For some reason, if you modify the internal EEPROM to change the serial number, the i1d3 returns back with the product code 0x5021
 		//
-		// Reading the internal eeprom seems to reset this issue, but you MUST unplug and plug back in the USB connection
+		// Reading the internal EEPROM seems to reset this issue, but you MUST unplug and plug back in the USB connection
 		// I think this resets the device driver ?
 
 		int id = i1d3UnLock(hidDev);
-		i1d3EnWrite(hidDev);
+		if(i1d3EnWrite(hidDev) < 0)
+		{
+			if(fileName) delete[] fileName;
+			cout << "Error: Failed to enable i1d3 write mode" << endl;
+			exit(1);
+		}
 		unsigned char fBuf[256];
 		memset(fBuf, 0x00, 256);
 		i1d3ReadInternalEeprom(hidDev, fBuf);
@@ -1052,7 +1165,12 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		i1d3EnWrite(hidDev);
+		if(i1d3EnWrite(hidDev) < 0)
+		{
+			if(fileName) delete[] fileName;
+			cout << "Error: Failed to enable i1d3 write mode" << endl;
+			exit(1);
+		}
 
 		unsigned char* eBuf = new unsigned char[256];
 		memset(eBuf, 0x00, 256);
@@ -1064,10 +1182,9 @@ int main(int argc, char **argv)
 
 		memcpy(&eBuf[16], serNum, 20);
 
-		if(enableEEPROMwrite) i1d3WriteInternalEeprom(hidDev, eBuf);
-		else cout << "EEPROM write not enabled, use -w" << endl;
+		i1d3WriteInternalEeprom(hidDev, eBuf);
 
-		cout << "Serial number " << fileName << " successfully written to the internal eeprom" << endl;
+		cout << "Serial number " << fileName << " successfully written to the internal EEPROM" << endl;
 		cout << "Now unplug and plugin the USB connection" << endl;
 
 		delete[] eBuf;
@@ -1081,37 +1198,17 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		HANDLE hd;
-		if(forceOverWrite)
-		{
-			hd = CreateFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
-		}
-		else
-		{
-			hd = CreateFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
-		}
-
-		if(hd == INVALID_HANDLE_VALUE)
-		{
-			cout << "Error: Failed to open file " << fileName << " for writing" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
-		if(SetFilePointer(hd, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
-		{
-			cout << "Error: Failed to open file " << fileName << " for writing" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
 		unsigned char* eBuf = new unsigned char[256];
 		memset(eBuf, 0x00, 256);
-		i1d3ReadInternalEeprom(hidDev, eBuf);
+		if(!readInternalEepromStable(hidDev, eBuf))
+		{
+			cout << "Error: Internal EEPROM triple-read mismatch, aborting file write" << endl;
+			if(fileName) delete[] fileName;
+			delete[] eBuf;
+			exit(1);
+		}
 
-		DWORD noWritten(0);
-		if(!WriteFile(hd, eBuf, 256, &noWritten, NULL)) return -1;
-		if (noWritten != 256)
+		if(!writeFileBytes(fileName, eBuf, 256, forceOverWrite))
 		{
 			cout << "Error: Failed to write file " << fileName << endl;
 			if(fileName) delete[] fileName;
@@ -1119,31 +1216,23 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		cout << "Internal eeprom memory written to file " << fileName << endl;
-
-		if(!CloseHandle(hd))
+		if(!verifyFileMatches(fileName, eBuf, 256))
 		{
-			cout << "Error: Failed to close file " << fileName << endl;
+			cout << "Error: File verification failed for " << fileName << endl;
 			if(fileName) delete[] fileName;
 			delete[] eBuf;
 			exit(1);
 		}
 
+		cout << "Internal EEPROM memory written and verified in file " << fileName << endl;
+
 		delete[] eBuf;
 	}
 	else if(wIeeprom)
 	{
-		HANDLE hd = CreateFile(fileName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
-		if(hd == INVALID_HANDLE_VALUE)
+		if(!validateFileSize(fileName, 256) && !forceOverWrite)
 		{
-			cout << "Error: Failed to open file " << fileName << " for reading" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
-		if(SetFilePointer(hd, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
-		{
-			cout << "Error: Failed to open file " << fileName << " for reading" << endl;
+			cout << "Error: Internal EEPROM input file must be exactly 256 bytes (use -f to force)" << endl;
 			if(fileName) delete[] fileName;
 			exit(1);
 		}
@@ -1151,19 +1240,9 @@ int main(int argc, char **argv)
 		unsigned char* eBuf = new unsigned char[256];
 		memset(eBuf, 0x00, 256);
 
-		DWORD noRead(0);
-		if(!ReadFile(hd, eBuf, 256, &noRead, NULL)) return -1;
-		if (noRead != 256)
+		if(!readFileBytes(fileName, eBuf, 256))
 		{
 			cout << "Error: Failed to read file " << fileName << endl;
-			if(fileName) delete[] fileName;
-			delete[] eBuf;
-			exit(1);
-		}
-
-		if(!CloseHandle(hd))
-		{
-			cout << "Error: Failed to close file " << fileName << endl;
 			if(fileName) delete[] fileName;
 			delete[] eBuf;
 			exit(1);
@@ -1177,12 +1256,17 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		i1d3EnWrite(hidDev);
+		if(i1d3EnWrite(hidDev) < 0)
+		{
+			if(fileName) delete[] fileName;
+			delete[] eBuf;
+			cout << "Error: Failed to enable i1d3 write mode" << endl;
+			exit(1);
+		}
 
-		if(enableEEPROMwrite) i1d3WriteInternalEeprom(hidDev, eBuf);
-		else cout << "EEPROM write not enabled, use -w" << endl;
+		i1d3WriteInternalEeprom(hidDev, eBuf);
 
-		cout << "File " << fileName << " successfully written to the internal eeprom" << endl;
+		cout << "File " << fileName << " successfully written to the internal EEPROM" << endl;
 		cout << "Now unplug and plugin the USB connection" << endl;
 
 		delete[] eBuf;
@@ -1196,37 +1280,17 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		HANDLE hd;
-		if(forceOverWrite)
-		{
-			hd = CreateFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
-		}
-		else
-		{
-			hd = CreateFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
-		}
-
-		if(hd == INVALID_HANDLE_VALUE)
-		{
-			cout << "Error: Failed to open file " << fileName << " for writing" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
-		if(SetFilePointer(hd, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
-		{
-			cout << "Error: Failed to open file " << fileName << " for writing" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
 		unsigned char* eBuf = new unsigned char[8192];
 		memset(eBuf, 0x00, 8192);
-		i1d3ReadExternalEeprom(hidDev, eBuf);
+		if(!readExternalEepromStable(hidDev, eBuf))
+		{
+			cout << "Error: External EEPROM triple-read mismatch, aborting file write" << endl;
+			if(fileName) delete[] fileName;
+			delete[] eBuf;
+			exit(1);
+		}
 
-		DWORD noWritten(0);
-		if(!WriteFile(hd, eBuf, 8192, &noWritten, NULL)) return -1;
-		if (noWritten != 8192)
+		if(!writeFileBytes(fileName, eBuf, 8192, forceOverWrite))
 		{
 			cout << "Error: Failed to write file " << fileName << endl;
 			if(fileName) delete[] fileName;
@@ -1234,31 +1298,23 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		cout << "External eeprom memory written to file " << fileName << endl;
-
-		if(!CloseHandle(hd))
+		if(!verifyFileMatches(fileName, eBuf, 8192))
 		{
-			cout << "Error: Failed to close file " << fileName << endl;
+			cout << "Error: File verification failed for " << fileName << endl;
 			if(fileName) delete[] fileName;
 			delete[] eBuf;
 			exit(1);
 		}
 
+		cout << "External EEPROM memory written and verified in file " << fileName << endl;
+
 		delete[] eBuf;
 	}
 	else if(wEeeprom)
 	{
-		HANDLE hd = CreateFile(fileName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
-		if(hd == INVALID_HANDLE_VALUE)
+		if(!validateFileSize(fileName, 8192) && !forceOverWrite)
 		{
-			cout << "Error: Failed to open file " << fileName << " for reading" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
-		if(SetFilePointer(hd, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
-		{
-			cout << "Error: Failed to open file " << fileName << " for reading" << endl;
+			cout << "Error: External EEPROM input file must be exactly 8192 bytes (use -f to force)" << endl;
 			if(fileName) delete[] fileName;
 			exit(1);
 		}
@@ -1266,9 +1322,7 @@ int main(int argc, char **argv)
 		unsigned char* eBuf = new unsigned char[8192];
 		memset(eBuf, 0x00, 8192);
 
-		DWORD noRead(0);
-		if(!ReadFile(hd, eBuf, 8192, &noRead, NULL)) return -1;
-		if (noRead != 8192)
+		if(!readFileBytes(fileName, eBuf, 8192))
 		{
 			cout << "Error: Failed to read file " << fileName << endl;
 			if(fileName) delete[] fileName;
@@ -1276,55 +1330,40 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		if(!CloseHandle(hd))
+		if(i1d3UnLock(hidDev) < 0)
 		{
-			cout << "Error: Failed to close file " << fileName << endl;
 			if(fileName) delete[] fileName;
 			delete[] eBuf;
+			cout << "Error: Failed to unlock the i1d3" << endl;
 			exit(1);
 		}
 
-		i1d3UnLock(hidDev);
+		if(i1d3EnWrite(hidDev) < 0)
+		{
+			if(fileName) delete[] fileName;
+			delete[] eBuf;
+			cout << "Error: Failed to enable i1d3 write mode" << endl;
+			exit(1);
+		}
 
-		i1d3EnWrite(hidDev);
+		i1d3WriteExternalEeprom(hidDev, eBuf);
 
-		if(enableEEPROMwrite) i1d3WriteExternalEeprom(hidDev, eBuf);
-		else cout << "EEPROM write not enabled, use -w" << endl;
-
-		cout << "File " << fileName << " successfully written to the external eeprom" << endl;
+		cout << "File " << fileName << " successfully written to the external EEPROM" << endl;
 		cout << "Now unplug and plugin the USB connection" << endl;
 
 		delete[] eBuf;
 	}
 	else if(rSig)
 	{
-		HANDLE hd;
-		if(forceOverWrite)
-		{
-			hd = CreateFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
-		}
-		else
-		{
-			hd = CreateFile(fileName, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
-		}
-
-		if(hd == INVALID_HANDLE_VALUE)
-		{
-			cout << "Error: Failed to open file " << fileName << " for writing" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
-		if(SetFilePointer(hd, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
-		{
-			cout << "Error: Failed to open file " << fileName << " for writing" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
 		unsigned char* eBuf = new unsigned char[8192];
 		memset(eBuf, 0x00, 8192);
-		i1d3ReadExternalEeprom(hidDev, eBuf);
+		if(!readExternalEepromStable(hidDev, eBuf))
+		{
+			cout << "Error: External EEPROM triple-read mismatch, aborting file write" << endl;
+			if(fileName) delete[] fileName;
+			delete[] eBuf;
+			exit(1);
+		}
 
 		unsigned char* buf = new unsigned char[0x48];
 		memset(buf, 0x00, 0x48);
@@ -1332,9 +1371,7 @@ int main(int argc, char **argv)
 		memcpy(buf, &eBuf[0x1638], 0x48);
 		delete[] eBuf;
 
-		DWORD noWritten(0);
-		if(!WriteFile(hd, buf, 0x48, &noWritten, NULL)) return -1;
-		if (noWritten != 0x48)
+		if(!writeFileBytes(fileName, buf, 0x48, forceOverWrite))
 		{
 			cout << "Error: Failed to write file " << fileName << endl;
 			if(fileName) delete[] fileName;
@@ -1342,31 +1379,23 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		cout << "External eeprom memory written to file " << fileName << endl;
-
-		if(!CloseHandle(hd))
+		if(!verifyFileMatches(fileName, buf, 0x48))
 		{
-			cout << "Error: Failed to close file " << fileName << endl;
+			cout << "Error: File verification failed for " << fileName << endl;
 			if(fileName) delete[] fileName;
 			delete[] buf;
 			exit(1);
 		}
 
+		cout << "External EEPROM signature written and verified in file " << fileName << endl;
+
 		delete[] buf;
 	}
 	else if(wSig)
 	{
-		HANDLE hd = CreateFile(fileName, GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
-		if(hd == INVALID_HANDLE_VALUE)
+		if(!validateFileSize(fileName, 0x48) && !forceOverWrite)
 		{
-			cout << "Error: Failed to open file " << fileName << " for reading" << endl;
-			if(fileName) delete[] fileName;
-			exit(1);
-		}
-
-		if(SetFilePointer(hd, 0, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER)
-		{
-			cout << "Error: Failed to open file " << fileName << " for reading" << endl;
+			cout << "Error: Signature input file must be exactly 72 bytes (use -f to force)" << endl;
 			if(fileName) delete[] fileName;
 			exit(1);
 		}
@@ -1374,9 +1403,7 @@ int main(int argc, char **argv)
 		unsigned char* buf = new unsigned char[0x48];
 		memset(buf, 0x00, 0x48);
 
-		DWORD noRead(0);
-		if(!ReadFile(hd, buf, 0x48, &noRead, NULL)) return -1;
-		if (noRead != 0x48)
+		if(!readFileBytes(fileName, buf, 0x48))
 		{
 			cout << "Error: Failed to read file " << fileName << endl;
 			if(fileName) delete[] fileName;
@@ -1384,17 +1411,30 @@ int main(int argc, char **argv)
 			exit(1);
 		}
 
-		if(!CloseHandle(hd))
+		if(isBlockedRetailSignature(buf, 0x48) && !forceOverWrite)
 		{
-			cout << "Error: Failed to close file " << fileName << endl;
+			cout << "Error: Refusing to write known invalid placeholder signature file." << endl;
+			cout << "       This can soft-brick the probe: i1d3util/retail_I1D3signature.bin (use -f to override)" << endl;
 			if(fileName) delete[] fileName;
 			delete[] buf;
 			exit(1);
 		}
 
-		i1d3UnLock(hidDev);
+		if(i1d3UnLock(hidDev) < 0)
+		{
+			if(fileName) delete[] fileName;
+			delete[] buf;
+			cout << "Error: Failed to unlock the i1d3" << endl;
+			exit(1);
+		}
 
-		i1d3EnWrite(hidDev);
+		if(i1d3EnWrite(hidDev) < 0)
+		{
+			if(fileName) delete[] fileName;
+			delete[] buf;
+			cout << "Error: Failed to enable i1d3 write mode" << endl;
+			exit(1);
+		}
 
 		unsigned char* eBuf = new unsigned char[8192];
 		memset(eBuf, 0x00, 8192);
@@ -1411,7 +1451,7 @@ int main(int argc, char **argv)
 			delete[] buf;
 			delete[] eBuf;
 
-			cout << "Error: Checksum of i1d3 external eeprom failed.  This may mean it is not Rev2 hardware" << endl;
+			cout << "Error: Checksum of i1d3 external EEPROM failed.  This may mean it is not Rev2 hardware" << endl;
 			exit(1);
 		}
 
@@ -1422,19 +1462,126 @@ int main(int argc, char **argv)
 		eBuf[3] = (unsigned char)(csum >> 8) & 0xff;
 
 		
-		if(enableEEPROMwrite) i1d3WriteExternalEeprom(hidDev, eBuf);
-		else cout << "EEPROM write not enabled, use -w" << endl;
+		i1d3WriteExternalEeprom(hidDev, eBuf);
 
-		cout << "File " << fileName << " signature successfully written to the external eeprom" << endl;
+		cout << "File " << fileName << " signature successfully written to the external EEPROM" << endl;
 		cout << "Now unplug and plugin the USB connection" << endl;
 
 		delete[] buf;
 		delete[] eBuf;
 	}
+	else if(rAll)
+	{
+		if(i1d3UnLock(hidDev) < 0)
+		{
+			cout << "Error: Failed to unlock the i1d3" << endl;
+			exit(1);
+		}
+
+		unsigned char* iBuf = new unsigned char[256];
+		unsigned char* eBuf = new unsigned char[8192];
+		unsigned char* sBuf = new unsigned char[0x48];
+		if(!iBuf || !eBuf || !sBuf)
+		{
+			if(iBuf) delete[] iBuf;
+			if(eBuf) delete[] eBuf;
+			if(sBuf) delete[] sBuf;
+			cout << "Error: Failed to allocate memory for -a dump" << endl;
+			exit(1);
+		}
+		memset(iBuf, 0x00, 256);
+		memset(eBuf, 0x00, 8192);
+		memset(sBuf, 0x00, 0x48);
+
+		if(!readInternalEepromStable(hidDev, iBuf))
+		{
+			cout << "Error: Internal EEPROM triple-read mismatch, aborting -a dump" << endl;
+			delete[] iBuf;
+			delete[] eBuf;
+			delete[] sBuf;
+			exit(1);
+		}
+		if(!readExternalEepromStable(hidDev, eBuf))
+		{
+			cout << "Error: External EEPROM triple-read mismatch, aborting -a dump" << endl;
+			delete[] iBuf;
+			delete[] eBuf;
+			delete[] sBuf;
+			exit(1);
+		}
+
+		memcpy(sBuf, &eBuf[0x1638], 0x48);
+
+		char serialRaw[21];
+		memset(serialRaw, 0x00, 21);
+		memcpy(serialRaw, &iBuf[16], 20);
+
+		char serialSafe[41];
+		memset(serialSafe, 0x00, 41);
+		int out(0);
+		for(int i(0); i < 20 && serialRaw[i] != 0; ++i)
+		{
+			unsigned char ch = (unsigned char)serialRaw[i];
+			if(isalnum(ch) || ch == '-' || ch == '_' || ch == '.')
+			{
+				serialSafe[out++] = (char)ch;
+			}
+			else if(ch == ' ')
+			{
+				serialSafe[out++] = '_';
+			}
+			else
+			{
+				serialSafe[out++] = '_';
+			}
+		}
+		if(out == 0) strcpy(serialSafe, "unknown-serial");
+
+		char internalFile[128];
+		char externalFile[128];
+		char signatureFile[128];
+		snprintf(internalFile, sizeof(internalFile), "%s-internal.bin", serialSafe);
+		snprintf(externalFile, sizeof(externalFile), "%s-external.bin", serialSafe);
+		snprintf(signatureFile, sizeof(signatureFile), "%s-signature.bin", serialSafe);
+
+		if(!writeFileBytes(internalFile, iBuf, 256, forceOverWrite) || !verifyFileMatches(internalFile, iBuf, 256))
+		{
+			cout << "Error: Failed to write/verify file " << internalFile << endl;
+			delete[] iBuf;
+			delete[] eBuf;
+			delete[] sBuf;
+			exit(1);
+		}
+		if(!writeFileBytes(externalFile, eBuf, 8192, forceOverWrite) || !verifyFileMatches(externalFile, eBuf, 8192))
+		{
+			cout << "Error: Failed to write/verify file " << externalFile << endl;
+			delete[] iBuf;
+			delete[] eBuf;
+			delete[] sBuf;
+			exit(1);
+		}
+		if(!writeFileBytes(signatureFile, sBuf, 0x48, forceOverWrite) || !verifyFileMatches(signatureFile, sBuf, 0x48))
+		{
+			cout << "Error: Failed to write/verify file " << signatureFile << endl;
+			delete[] iBuf;
+			delete[] eBuf;
+			delete[] sBuf;
+			exit(1);
+		}
+
+		cout << "Internal EEPROM saved and verified: " << internalFile << endl;
+		cout << "External EEPROM saved and verified: " << externalFile << endl;
+		cout << "Signature saved and verified: " << signatureFile << endl;
+
+		delete[] iBuf;
+		delete[] eBuf;
+		delete[] sBuf;
+	}
 
 	if(fileName) delete[] fileName;
 
 	closeHIDdevice(hidDev);
+	hid_exit();
 
 
 	return 0;

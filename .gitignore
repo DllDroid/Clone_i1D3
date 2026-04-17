@@ -1,0 +1,6 @@
+.DS_Store
+**/.DS_Store
+
+# Local IDE/build artifacts
+i1d3util/.vs/
+i1d3util/build/
